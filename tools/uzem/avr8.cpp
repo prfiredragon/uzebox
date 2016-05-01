@@ -49,7 +49,6 @@ More info at uzebox.org
 #endif // NOGDB
 #include "SDEmulator.h"
 #include "Keyboard.h"
-#include "logo.h"
 
 using namespace std;
 
@@ -118,8 +117,6 @@ using namespace std;
 #define DELAY16MS			457142	//in cpu cycles
 #define HSYNC_HALF_PERIOD 	910		//in cpu cycles
 #define HSYNC_PERIOD 		1820	//in cpu cycles
-
-static const char* joySettingsFilename = "joystick-settings";
 
 #define SD_ENABLED() SDpath
 
@@ -240,35 +237,6 @@ inline static void store_bit_1(u8 &dest, unsigned int bit, unsigned int value)
 #define DIS(fmt,...)
 #endif
 
-static u8 encode_delta(int d)
-{
-	u8 result;
-	if (d < 0)
-	{
-		result = 0;
-		d = -d;
-	}
-	else
-		result = 1;
-	if (d > 127)
-		d = 127;
-	if (!(d & 64))
-		result |= 2;
-	if (!(d & 32))
-		result |= 4;
-	if (!(d & 16))
-		result |= 8;
-	if (!(d & 8))
-		result |= 16;
-	if (!(d & 4))
-		result |= 32;
-	if (!(d & 2))
-		result |= 64;
-	if (!(d & 1))
-		result |= 128;
-	return result;
-}
-
 u32 hsync_more_col;
 u32 hsync_less_col;
 
@@ -291,14 +259,6 @@ void avr8::spi_calculateClock(){
     }
     spiCycleWait = spiClockDivider*8;
     SPI_DEBUG("SPI divider set to : %d (%d cycles per byte)\n",spiClockDivider,spiCycleWait);
-}
-
-// Renders a line into a 32 bit output buffer.
-// Performs a shrink by 2
-static inline void render_line(u32* dest, u8 const* src, unsigned int spos, u32 const* pal)
-{
-	for (unsigned int i = 0; i < VIDEO_DISP_WIDTH; i++)
-		dest[i] = pal[src[((i << 1) + spos) & 0x7FFU]];
 }
 
 inline void avr8::write_io(u8 addr,u8 value)
@@ -328,11 +288,9 @@ void avr8::write_io_x(u8 addr,u8 value)
 		{
 			// raw pcm sample at 15.7khz
 #ifndef __EMSCRIPTEN__
-			while (audioRing.isFull())SDL_Delay(1);
+			adrv->flush();
 #endif // __EMSCRIPTEN__
-			SDL_LockAudio();
-			audioRing.push(value);
-			SDL_UnlockAudio();
+			adrv->push(value);
 
 #ifndef __EMSCRIPTEN__
 			//Send audio byte to ffmpeg
@@ -367,13 +325,8 @@ void avr8::write_io_x(u8 addr,u8 value)
 			}
 			else if (scanline_count != -999)
 			{
-
 				if (scanline_count >= 0){
-					render_line(
-						(u32*)((u8*)surface->pixels + scanline_count * surface->pitch),
-						&scanline_buf[0],
-						left_edge + left_edge_cycle,
-						palette);
+					vdrv->render_line(scanline_count, &scanline_buf[0], left_edge + left_edge_cycle, palette);
 				}
 
 				scanline_count ++;
@@ -381,22 +334,17 @@ void avr8::write_io_x(u8 addr,u8 value)
 
 				if (scanline_count == 224)
 				{
-
-					SDL_UpdateTexture(texture, NULL, surface->pixels, surface->pitch);
-					SDL_RenderClear(renderer);
-					SDL_RenderCopy(renderer, texture, NULL, NULL);
-					SDL_RenderPresent(renderer);
-
+					vdrv->update_frame();
 #ifndef __EMSCRIPTEN__
 					//Send video frame to ffmpeg
-					if (recordMovie && avconv_video) fwrite(surface->pixels, VIDEO_DISP_WIDTH*224*4, 1, avconv_video);
+					if (recordMovie && avconv_video) vdrv->record_frame(avconv_video);
 #endif // __EMSCRIPTEN__
 
 					SDL_Event event;
 #ifndef NOGDB
-					while (singleStep? SDL_WaitEvent(&event) : SDL_PollEvent(&event))
+					while (singleStep ? idrv->wait(&event) : idrv->poll(&event))
 #else // NOGDB
-					while (SDL_PollEvent(&event))
+					while (idrv->poll(&event))
 #endif // NOGDB
 					{
 						switch (event.type) {
@@ -405,16 +353,6 @@ void avr8::write_io_x(u8 addr,u8 value)
 								break;
 							case SDL_KEYUP:
 								handle_key_up(event);
-								break;
-							case SDL_JOYBUTTONDOWN:
-							case SDL_JOYBUTTONUP:
-							case SDL_JOYAXISMOTION:
-							case SDL_JOYHATMOTION:
-							case SDL_JOYBALLMOTION:
-								if (jmap.jstate != JMAP_IDLE)
-									map_joysticks(event);
-								else
-									update_joysticks(event);
 								break;
 							case SDL_QUIT:
 								printf("User abort (closed window).\n");
@@ -425,43 +363,16 @@ void avr8::write_io_x(u8 addr,u8 value)
 
 					//capture or replay controlelr capture data
 					if(captureMode==CAPTURE_WRITE){
-						fputc((u8)(buttons[0]&0xff),captureFile);
-						fputc((u8)((buttons[0]>>8)&0xff),captureFile);
+						fputc((u8)(idrv->buttons[0]&0xff),captureFile);
+						fputc((u8)((idrv->buttons[0]>>8)&0xff),captureFile);
 					}else if(captureMode==CAPTURE_READ && captureSize>0){
-						buttons[0]=captureData[capturePtr]+(captureData[capturePtr+1]<<8);
+						idrv->buttons[0]=captureData[capturePtr]+(captureData[capturePtr+1]<<8);
 						capturePtr+=2;
 						captureSize-=2;
 					}else if(captureMode==CAPTURE_READ && captureSize==0){
 						printf("Playback reached end of capture file.\n");
 						shutdown(0);
 					}
-
-
-					if (pad_mode == SNES_MOUSE)
-					{
-						// http://www.repairfaq.org/REPAIR/F_SNES.html
-						// we always report "low sensitivity"
-						int mouse_dx, mouse_dy;
-						u8 mouse_buttons = SDL_GetRelativeMouseState(&mouse_dx,&mouse_dy);
-						mouse_dx >>= mouse_scale;
-						mouse_dy >>= mouse_scale;
-						// clear high bit so we know it's the mouse
-						buttons[0] = (encode_delta(mouse_dx) << 24)
-							| (encode_delta(mouse_dy) << 16) | 0x7FFF;
-						if (mouse_buttons & SDL_BUTTON_LMASK)
-							buttons[0] &= ~(1<<9);
-						if (mouse_buttons & SDL_BUTTON_RMASK)
-							buttons[0] &= ~(1<<8);
-						// keep mouse centered so it doesn't get stuck on edge of screen.
-						// ...and immediately consume the bogus motion event it generated.
-						if (fullscreen)
-						{
-							SDL_WarpMouseInWindow(window,400,300);
-							SDL_GetRelativeMouseState(&mouse_dx,&mouse_dy);
-						}
-					}
-					else
-						buttons[0] |= 0xFFFF8000;
 
 #ifndef NOGDB
 					singleStep = nextSingleStep;
@@ -482,7 +393,7 @@ void avr8::write_io_x(u8 addr,u8 value)
 		{
 			for (int i=0; i<2; i++)
 			{
-				latched_buttons[i] = buttons[i];
+				latched_buttons[i] = idrv->buttons[i];
 				// don't let UP+DOWN register at same time
 				if ((latched_buttons[i] & ((1<<PAD_LEFT)|(1<<PAD_RIGHT))) == 0)
 					latched_buttons[i] |= (1<<PAD_RIGHT);
@@ -2007,71 +1918,16 @@ bool avr8::init_sd()
 
 bool avr8::init_gui()
 {
-	if ( SDL_Init(SDL_INIT_AUDIO | SDL_INIT_VIDEO | SDL_INIT_JOYSTICK) != 0 )
+	if (!vdrv->init(caption, fullscreen, sdl_flags))
 	{
-		fprintf(stderr, "Unable to init SDL: %s\n", SDL_GetError());
 		return false;
 	}
 
-	atexit(SDL_Quit);
 	init_joysticks();
 
-	window = SDL_CreateWindow(caption,SDL_WINDOWPOS_CENTERED,SDL_WINDOWPOS_CENTERED,630,448,fullscreen?SDL_WINDOW_FULLSCREEN:SDL_WINDOW_RESIZABLE);
-	if (!window){
-		fprintf(stderr, "CreateWindow failed: %s\n", SDL_GetError());
-		return false;
-	}
-	renderer = SDL_CreateRenderer(window, -1, sdl_flags);
-	if (!renderer){
-		SDL_DestroyWindow(window);
-		fprintf(stderr, "CreateRenderer failed: %s\n", SDL_GetError());
-		return false;
-	}
-	SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "nearest");
-	SDL_RenderSetLogicalSize(renderer, 630, 448);
-
-	surface = SDL_CreateRGBSurface(0, VIDEO_DISP_WIDTH, 224, 32, 0, 0, 0, 0);
-	if(!surface){
-		fprintf(stderr, "CreateRGBSurface failed: %s\n", SDL_GetError());
-		return false;
-	}
-
-	texture = SDL_CreateTexture(renderer,surface->format->format,SDL_TEXTUREACCESS_STATIC,surface->w,surface->h);
-	if (!texture){
-		SDL_DestroyRenderer(renderer);
-		SDL_DestroyWindow(window);
-		fprintf(stderr, "CreateTexture failed: %s\n", SDL_GetError());
-		return false;
-	}
-
-	SDL_RenderClear(renderer);
-	SDL_RenderCopy(renderer, texture, NULL, NULL);
-	SDL_RenderPresent(renderer);
-
-
-	if (fullscreen)
+	if (enableSound && !adrv->init())
 	{
-		SDL_ShowCursor(0);
-	}
-
-	// Open audio driver
-	SDL_AudioSpec desired;
-	memset(&desired, 0, sizeof(desired));
-	desired.freq = 15734;
-	desired.format = AUDIO_U8;
-	desired.callback = audio_callback_stub;
-	desired.userdata = this;
-	desired.channels = 1;
-	desired.samples = 512;
-	if (enableSound)
-	{
-		if (SDL_OpenAudio(&desired, NULL) < 0)
-		{
-			fprintf(stderr, "Unable to open audio device, no sound will play.\n");
 			enableSound = false;
-		}
-		else
-			SDL_PauseAudio(0);
 	}
 
 	left_edge_cycle = cycleCounter;
@@ -2081,9 +1937,8 @@ bool avr8::init_gui()
 	//being perfectly centered in both the emulator and a real TV
 	left_edge = VIDEO_LEFT_EDGE;
 
-	latched_buttons[0] = buttons[0] = ~0;
-	latched_buttons[1] = buttons[1] = ~0;
-	mouse_scale = 1;
+	latched_buttons[0] = idrv->buttons[0] = ~0;
+	latched_buttons[1] = idrv->buttons[1] = ~0;
 
 	// Precompute final palette for speed.
 	// Should build some NTSC compensation magic in here too.
@@ -2092,59 +1947,53 @@ bool avr8::init_gui()
 		int red = (((i >> 0) & 7) * 255) / 7;
 		int green = (((i >> 3) & 7) * 255) / 7;
 		int blue = (((i >> 6) & 3) * 255) / 3;
-		palette[i] = SDL_MapRGB(surface->format, red, green, blue);
+		palette[i] = vdrv->map_rgb(red, green, blue);
 	}
 	
-	hsync_more_col=SDL_MapRGB(surface->format, 255,0, 0); //red
-	hsync_less_col=SDL_MapRGB(surface->format, 255,255, 0); //yellow
+	hsync_more_col=vdrv->map_rgb(255,0, 0); //red
+	hsync_less_col=vdrv->map_rgb(255,255, 0); //yellow
 
 #ifndef __EMSCRIPTEN__
 	if (recordMovie){
 
-		if (avconv_video == NULL){
-			// Detect the pixel format that the GPU picked for optimal speed
-			char pix_fmt[] = "aaaa";
-			switch (surface->format->Rmask) {
-			case 0xff000000: pix_fmt[3] = 'r'; break;
-			case 0x00ff0000: pix_fmt[2] = 'r'; break;
-			case 0x0000ff00: pix_fmt[1] = 'r'; break;
-			case 0x000000ff: pix_fmt[0] = 'r'; break;
-			}
-			switch (surface->format->Gmask) {
-			case 0xff000000: pix_fmt[3] = 'g'; break;
-			case 0x00ff0000: pix_fmt[2] = 'g'; break;
-			case 0x0000ff00: pix_fmt[1] = 'g'; break;
-			case 0x000000ff: pix_fmt[0] = 'g'; break;
-			}
-			switch (surface->format->Bmask) {
-			case 0xff000000: pix_fmt[3] = 'b'; break;
-			case 0x00ff0000: pix_fmt[2] = 'b'; break;
-			case 0x0000ff00: pix_fmt[1] = 'b'; break;
-			case 0x000000ff: pix_fmt[0] = 'b'; break;
-			}
-			printf("Pixel Format = %s\n", pix_fmt);
-			char avconv_video_cmd[1024] = {0};
-			snprintf(avconv_video_cmd, sizeof(avconv_video_cmd) - 1, "ffmpeg -y -f rawvideo -s %ux224 -pix_fmt %s -r 59.94 -i - -vf scale=960:720 -sws_flags neighbor -an -preset ultrafast -qp 0 -tune animation uzemtemp.mp4", VIDEO_DISP_WIDTH, pix_fmt);
-			avconv_video = popen(avconv_video_cmd, "w");
-		}
-		if (avconv_video == NULL){
-			fprintf(stderr, "Unable to init ffmpeg.\n");
-			return false;
-		}
-
-		avconv_audio = popen("ffmpeg -y -f u8 -ar 15734 -ac 1 -i - -acodec libmp3lame -ar 44.1k uzemtemp.mp3", "w");
-		if(avconv_audio == NULL){
-			fprintf(stderr, "Unable to init ffmpeg.\n");
-			return false;
-		}
+//		if (avconv_video == NULL){
+//			// Detect the pixel format that the GPU picked for optimal speed
+//			char pix_fmt[] = "aaaa";
+//			switch (surface->format->Rmask) {
+//			case 0xff000000: pix_fmt[3] = 'r'; break;
+//			case 0x00ff0000: pix_fmt[2] = 'r'; break;
+//			case 0x0000ff00: pix_fmt[1] = 'r'; break;
+//			case 0x000000ff: pix_fmt[0] = 'r'; break;
+//			}
+//			switch (surface->format->Gmask) {
+//			case 0xff000000: pix_fmt[3] = 'g'; break;
+//			case 0x00ff0000: pix_fmt[2] = 'g'; break;
+//			case 0x0000ff00: pix_fmt[1] = 'g'; break;
+//			case 0x000000ff: pix_fmt[0] = 'g'; break;
+//			}
+//			switch (surface->format->Bmask) {
+//			case 0xff000000: pix_fmt[3] = 'b'; break;
+//			case 0x00ff0000: pix_fmt[2] = 'b'; break;
+//			case 0x0000ff00: pix_fmt[1] = 'b'; break;
+//			case 0x000000ff: pix_fmt[0] = 'b'; break;
+//			}
+//			printf("Pixel Format = %s\n", pix_fmt);
+//			char avconv_video_cmd[1024] = {0};
+//			snprintf(avconv_video_cmd, sizeof(avconv_video_cmd) - 1, "ffmpeg -y -f rawvideo -s %ux224 -pix_fmt %s -r 59.94 -i - -vf scale=960:720 -sws_flags neighbor -an -preset ultrafast -qp 0 -tune animation uzemtemp.mp4", VIDEO_DISP_WIDTH, pix_fmt);
+//			avconv_video = popen(avconv_video_cmd, "w");
+//		}
+//		if (avconv_video == NULL){
+//			fprintf(stderr, "Unable to init ffmpeg.\n");
+//			return false;
+//		}
+//
+//		avconv_audio = popen("ffmpeg -y -f u8 -ar 15734 -ac 1 -i - -acodec libmp3lame -ar 44.1k uzemtemp.mp3", "w");
+//		if(avconv_audio == NULL){
+//			fprintf(stderr, "Unable to init ffmpeg.\n");
+//			return false;
+//		}
 	}
 #endif // __EMSCRIPTEN__
-
-	//Set window icon
-	SDL_Surface *slogo;
-	slogo = SDL_CreateRGBSurfaceFrom((void *)&logo,32,32,32,32*4,0xFF,0xff00,0xff0000,0xff000000);
-	SDL_SetWindowIcon(window,slogo);
-	SDL_FreeSurface(slogo);
 
 	return true;
 }
@@ -2166,16 +2015,12 @@ void avr8::handle_key_down(SDL_Event &ev)
 {
 	static int ssnum = 0;
 	char ssbuf[32];
-	static const char *pad_mode_strings[4] = {"NES pad.","SNES pad.","SNES 2p pad.","SNES mouse."};
 
 	if(uzeKbEnabled)
 	{
 		uzekb_handle_key(ev);
 		return;
 	}
-
-	if (jmap.jstate == JMAP_IDLE)
-		update_buttons(ev.key.keysym.sym,true);
 
 	switch (ev.key.keysym.sym)
 	{
@@ -2186,33 +2031,10 @@ void avr8::handle_key_down(SDL_Event &ev)
 			case SDLK_2: if (left_edge < 2047U - ((VIDEO_DISP_WIDTH * 7U) / 3U)) { left_edge++; } printf("left=%u\n",left_edge); break;
 			case SDLK_3: scanline_top--; printf("top=%d\n",scanline_top); break;
 			case SDLK_4: scanline_top++; printf("top=%d\n",scanline_top); break;
-			case SDLK_5: 
-				if (pad_mode == NES_PAD)
-					pad_mode = SNES_PAD;
-				else if(pad_mode == SNES_PAD)
-					pad_mode = SNES_PAD2;
-				else if(pad_mode == SNES_PAD2)
-					pad_mode = SNES_MOUSE;
-				else
-					pad_mode = NES_PAD;
-				puts(pad_mode_strings[pad_mode]); 
-				break;
 			case SDLK_6:
-				if (++mouse_scale == 6)
-					mouse_scale = 0;
-				printf("new mouse sensitivity is %d\n",mouse_scale);
-				break;
-			case SDLK_7:
-				if (jmap.jstate == JMAP_IDLE)
-					set_jmap_state(JMAP_INIT);
-				break;
-			case SDLK_n:
-				if (jmap.jstate == JMAP_MORE_AXES)
-					set_jmap_state(JMAP_DONE);
-				break;
-			case SDLK_y:
-				if (jmap.jstate == JMAP_MORE_AXES)
-					set_jmap_state(JMAP_AXES);
+				if (++idrv->mouse_scale == 6)
+					idrv->mouse_scale = 0;
+				printf("new mouse sensitivity is %d\n", idrv->mouse_scale);
 				break;
 			case SDLK_ESCAPE:
 				printf("user abort (pressed ESC).\n");
@@ -2221,30 +2043,7 @@ void avr8::handle_key_down(SDL_Event &ev)
 			case SDLK_PRINTSCREEN:
 				sprintf(ssbuf,"uzem_%03d.bmp",ssnum++);
 				printf("saving screenshot to '%s'...\n",ssbuf);
-                                {
-                                  SDL_Surface* surfBMP;
-                                  const Uint8 *kbstate = SDL_GetKeyboardState(NULL);
-                                  if (kbstate[SDL_SCANCODE_LSHIFT] || kbstate[SDL_SCANCODE_RSHIFT]) {
-                                    surfBMP = SDL_CreateRGBSurface(0, 240, 224, 32, 0, 0, 0, 0);
-                                  } else {
-                                    surfBMP = SDL_CreateRGBSurface(0, 630, 448, 32, 0, 0, 0, 0);
-                                  }
-                                  
-                                  if (!surfBMP){
-                                    fprintf(stderr, "CreateRGBSurface failed: %s\n", SDL_GetError());
-                                  } else {
-                                    if (SDL_BlitScaled(surface, NULL, surfBMP, NULL) < 0) {
-                                      fprintf(stderr, "BlitScaled failed: %s\n", SDL_GetError());
-                                      SDL_FreeSurface(surfBMP);
-                                    } else {
-                                      SDL_SaveBMP(surfBMP,ssbuf);
-                                      SDL_FreeSurface(surfBMP);
-                                      break;
-                                    }
-                                  }
-                                }
-                                fprintf(stderr, "There was a problem rescaling the screenshot, saving the unscaled version.\n");
-                                SDL_SaveBMP(surface,ssbuf); // at least save the weirdly scaled one				
+				vdrv->screenshot(ssbuf);
 				break;
 			case SDLK_0:
 				PIND = PIND & ~0b00001100;
@@ -2271,13 +2070,6 @@ void avr8::handle_key_down(SDL_Event &ev)
 	}
 }
 
-void avr8::audio_callback(Uint8 *stream,int len)
-{
-	// printf("want %d bytes (have %d)\n",len,audioRing.getUsed());
-	while (len--)
-		*stream++ = audioRing.pop();
-}
-
 void avr8::handle_key_up(SDL_Event &ev)
 {
 	if(uzeKbEnabled){
@@ -2285,320 +2077,15 @@ void avr8::handle_key_up(SDL_Event &ev)
 		return;
 	}
 
-	update_buttons(ev.key.keysym.sym,false);
 	if (ev.key.keysym.sym == SDLK_0) PIND |= 0b00001100;		//return soft power switch to normal (pullup)
 }
 
-struct keymap { u32 key; u8 player, bit; };
-#define END_OF_MAP { 0,0,0 }
-keymap nes_one_player[] = 
-{	
-	{ SDLK_a, 0, NES_A }, { SDLK_s, 0, NES_B }, { SDLK_TAB, 0, PAD_SELECT }, { SDLK_RETURN, 0, PAD_START },
-	{ SDLK_UP, 0, PAD_UP }, { SDLK_DOWN, 0, PAD_DOWN }, { SDLK_LEFT, 0, PAD_LEFT }, { SDLK_RIGHT, 0, PAD_RIGHT },
-	END_OF_MAP
-};
-keymap snes_one_player[] =
-{
-	{ SDLK_s, 0, SNES_B }, { SDLK_z, 0, SNES_Y }, { SDLK_TAB, 0, PAD_SELECT }, { SDLK_RETURN, 0, PAD_START },
-	{ SDLK_UP, 0, PAD_UP }, { SDLK_DOWN, 0, PAD_DOWN }, { SDLK_LEFT, 0, PAD_LEFT }, { SDLK_RIGHT, 0, PAD_RIGHT },
-	{ SDLK_a, 0, SNES_A }, { SDLK_x, 0, SNES_X }, { SDLK_LSHIFT, 0, SNES_LSH }, { SDLK_RSHIFT, 0, SNES_RSH },
-	END_OF_MAP
-};
-
-keymap snes_two_players[] =
-{
-   // P1
-   { SDLK_a, 0, PAD_LEFT }, { SDLK_s, 0, PAD_DOWN }, { SDLK_d, 0, PAD_RIGHT }, { SDLK_w, 0, PAD_UP },
-   { SDLK_q, 0, SNES_LSH }, { SDLK_e, 0, SNES_RSH }, { SDLK_r, 0, SNES_Y }, { SDLK_t, 0, SNES_X },
-   { SDLK_f, 0, SNES_B }, { SDLK_g, 0, SNES_A }, { SDLK_z, 0, PAD_START }, { SDLK_x, 0, PAD_SELECT },
-   // P2
-   { SDLK_j, 1, PAD_LEFT }, { SDLK_k, 1, PAD_DOWN }, { SDLK_l, 1, PAD_RIGHT }, { SDLK_i, 1, PAD_UP },
-   { SDLK_u, 1, SNES_LSH }, { SDLK_o, 1, SNES_RSH }, { SDLK_p, 1, SNES_Y }, { SDLK_LEFTBRACKET, 1, SNES_X },
-   { SDLK_SEMICOLON, 1, SNES_B }, { SDLK_QUOTE, 1, SNES_A }, { SDLK_n, 1, PAD_START }, { SDLK_m, 1, PAD_SELECT },
-   END_OF_MAP
-};
-
-keymap snes_mouse[] =
-{
-	END_OF_MAP
-};
-keymap *keymaps[] = { nes_one_player, snes_one_player, snes_two_players, snes_mouse };
-
-void avr8::update_buttons(int key,bool down)
-{
-	keymap *k = keymaps[pad_mode];
-	while (k->key)
-	{
-		if (key == k->key)
-		{
-			if (down)
-				buttons[k->player] &= ~(1<<k->bit);
-			else
-				buttons[k->player] |= (1<<k->bit);
-			break;
-		}
-		++k;
-	}
-}
-
-// Joysticks
-struct joyButton joy_btns_p1[] =
-{
-	{ JOY_SNES_START, PAD_START }, { JOY_SNES_SELECT, PAD_SELECT },
-	{ JOY_SNES_A, SNES_A }, { JOY_SNES_B, SNES_B },
-	{ JOY_SNES_X, SNES_X }, { JOY_SNES_Y, SNES_Y },
-	{ JOY_SNES_LSH, SNES_LSH }, { JOY_SNES_RSH, SNES_RSH }
-};
-
-struct joyButton joy_btns_p2[] =
-{
-	{ JOY_SNES_START, PAD_START }, { JOY_SNES_SELECT, PAD_SELECT },
-	{ JOY_SNES_A, SNES_A }, { JOY_SNES_B, SNES_B },
-	{ JOY_SNES_X, SNES_X }, { JOY_SNES_Y, SNES_Y },
-	{ JOY_SNES_LSH, SNES_LSH }, { JOY_SNES_RSH, SNES_RSH }
-};
-
-struct joyButton *joyButtons[] =  { joy_btns_p1, joy_btns_p2 };
-
 void avr8::init_joysticks() {
-	if (SDL_JoystickEventState(SDL_QUERY) != SDL_ENABLE && SDL_JoystickEventState(SDL_ENABLE) != SDL_ENABLE)
+	if (!idrv->joystick_init())
 	{
 		printf("No supported joysticks found.\n");
 	}
-	else
-	{
-		jmap.jstate = JMAP_IDLE;
-
-		for (int i = 0; i < MAX_JOYSTICKS; ++i) {
-			for (int j= 0; j < MAX_JOYSTICK_AXES; ++j)
-				joysticks[i].axes[j].axis = JOY_AXIS_UNUSED;
-		}
-			
-		load_joystick_file(joySettingsFilename);
-		
-		for (int i = 0; i < MAX_JOYSTICKS; ++i) {
-			if ((joysticks[i].device = SDL_JoystickOpen(i)) == NULL)
-				printf("P%i joystick not found.\n", i+1);
-			else {
-				joysticks[i].buttons = joyButtons[i];
-				joysticks[i].hats = 0;
-				printf("P%i joystick: %s.\n", i+1,SDL_JoystickName(joysticks[i].device));
-			}
-			
-			for (int j= 0; j < MAX_JOYSTICK_AXES; ++j)
-				joysticks[i].axes[j].bits = 0;
-		}
-	}
 }
-
-void avr8::set_jmap_state(int state)
-{
-	switch (state) {
-		case JMAP_INIT:
-			printf("Press START on the joystick you wish to re-map...");
-			fflush(stdout);
-			break;
-		case JMAP_BUTTONS:
-			jmap.jiter = 0;
-			jmap.jaxis = JOY_AXIS_UNUSED;
-			
-			for (int i= 0; i < MAX_JOYSTICK_AXES; ++i)
-				joysticks[jmap.jindex].axes[i].axis = JOY_AXIS_UNUSED;
-			break;
-		case JMAP_AXES:
-			jmap.jiter = NUM_JOYSTICK_BUTTONS;
-			jmap.jaxis = JOY_AXIS_UNUSED;
-			printf("\nPress Left on axial input (hats are mapped automatically and won't register)...");
-			fflush(stdout);
-			break;
-		case JMAP_MORE_AXES:
-			jmap.jiter = NUM_JOYSTICK_BUTTONS+2;
-			printf("\nMap an axial input (y/n)? ");
-			fflush(stdout);
-			break;
-		case JMAP_DONE:
-			jmap.jstate = JMAP_IDLE;
-			joystickFile = joySettingsFilename;	// Save on exit
-			printf("\nJoystick mappings complete.\n");
-			fflush(stdout);
-			state = JMAP_IDLE;
-			break;
-		default:
-			break;
-	}
-	jmap.jstate = state;
-}
-
-void avr8::map_joysticks(SDL_Event &ev)
-{	
-	if (jmap.jstate == JMAP_MORE_AXES) {
-		return;
-	} else if (jmap.jstate == JMAP_INIT) { // Initialize mapping settings
-		jmap.jindex = ev.jbutton.which;
-		set_jmap_state(JMAP_BUTTONS);
-	} else if (ev.jbutton.which != jmap.jindex) {
-		return; // Ignore input from all joysticks but the one being mapped
-	}
-
-	if (jmap.jstate == JMAP_BUTTONS) {
-		if (ev.jbutton.type == SDL_JOYBUTTONDOWN)
-				joyButtons[ev.jbutton.which][jmap.jiter].button = ev.jbutton.button;
-		else
-			return;
-	} else if (jmap.jstate == JMAP_AXES && ev.type == SDL_JOYAXISMOTION) {
-		// Find index to place new axes
-		if (jmap.jaxis == JOY_AXIS_UNUSED) {
-			for (int i = 0; i < MAX_JOYSTICK_AXES; i+=2) {
-				if (joysticks[jmap.jindex].axes[i].axis == JOY_AXIS_UNUSED || joysticks[jmap.jindex].axes[i].axis == ev.jaxis.axis) {
-					joysticks[jmap.jindex].axes[i].axis = JOY_AXIS_UNUSED;
-					joysticks[jmap.jindex].axes[i+1].axis = JOY_AXIS_UNUSED;
-					jmap.jaxis = i;
-					break;
-				}
-			}
-		}
-		
-		if (joysticks[jmap.jindex].axes[jmap.jaxis].axis == JOY_AXIS_UNUSED) {
-			if (ev.jaxis.value < -(2*JOY_ANALOG_DEADZONE))
-				joysticks[jmap.jindex].axes[jmap.jaxis].axis = ev.jaxis.axis;
-			else
-				return;
-		} else if (joysticks[jmap.jindex].axes[jmap.jaxis].axis != ev.jaxis.axis && ev.jaxis.value < -(2*JOY_ANALOG_DEADZONE)) {
-			joysticks[jmap.jindex].axes[jmap.jaxis+1].axis = ev.jaxis.axis;
-		} else {
-			return;
-		}
-	} else {
-		return;
-	}
-	
-	if (++jmap.jiter == NUM_JOYSTICK_BUTTONS) {
-		if (SDL_JoystickNumAxes(joysticks[jmap.jindex].device) == 0) {
-			set_jmap_state(JMAP_DONE);
-			return;
-		} else {
-			set_jmap_state(JMAP_MORE_AXES);
-		}
-	} else if (jmap.jiter == (NUM_JOYSTICK_BUTTONS+2)) {
-		set_jmap_state(JMAP_MORE_AXES);
-	}
-	
-	switch (jmap.jiter) {
-		case 1: printf("\nPress SELECT..."); break;
-		case 2: printf("\nPress A..."); break;
-		case 3: printf("\nPress B..."); break;
-		case 4: printf("\nPress X..."); break;
-		case 5: printf("\nPress Y..."); break;
-		case 6: printf("\nPress LShldr..."); break;
-		case 7: printf("\nPress RShldr..."); break;
-		case 9: printf("\nPress Up on axial input..."); break;
-		default: break;
-	}
-	fflush(stdout);
-}
-
-void avr8::update_joysticks(SDL_Event &ev)
-{
-	u8 axisBits = 0;
-	
-	if (ev.type == SDL_JOYAXISMOTION) {
-		for (int i = 0; i < MAX_JOYSTICK_AXES; ++i) {
-			if (joysticks[ev.jaxis.which].axes[i].axis == -1)
-				break;
-			if (joysticks[ev.jaxis.which].axes[i].axis != ev.jaxis.axis) {
-				axisBits |= joysticks[ev.jaxis.which].axes[i].bits;
-				continue;
-			}
-			if (i&1) {
-				if (ev.jaxis.value < -JOY_ANALOG_DEADZONE) { // UP
-					joysticks[ev.jaxis.which].axes[i].bits |= JOY_DIR_UP;
-					joysticks[ev.jaxis.which].axes[i].bits &= ~JOY_DIR_DOWN;
-				} else if (ev.jaxis.value > JOY_ANALOG_DEADZONE) { // DOWN
-					joysticks[ev.jaxis.which].axes[i].bits |= JOY_DIR_DOWN;
-					joysticks[ev.jaxis.which].axes[i].bits &= ~JOY_DIR_UP;
-				} else {
-					joysticks[ev.jaxis.which].axes[i].bits &= ~(JOY_DIR_UP|JOY_DIR_DOWN);
-				}
-			} else {
-				if (ev.jaxis.value < -JOY_ANALOG_DEADZONE) { // LEFT
-					joysticks[ev.jaxis.which].axes[i].bits |= JOY_DIR_LEFT;
-					joysticks[ev.jaxis.which].axes[i].bits &= ~JOY_DIR_RIGHT;
-				} else if (ev.jaxis.value > JOY_ANALOG_DEADZONE) { // RIGHT
-					joysticks[ev.jaxis.which].axes[i].bits |= JOY_DIR_RIGHT;
-					joysticks[ev.jaxis.which].axes[i].bits &= ~JOY_DIR_LEFT;
-				} else {
-					joysticks[ev.jaxis.which].axes[i].bits &= ~(JOY_DIR_LEFT|JOY_DIR_RIGHT);
-				}
-			}
-			axisBits |= joysticks[ev.jaxis.which].axes[i].bits;
-		}
-	} else if (ev.type == SDL_JOYHATMOTION) {
-		joysticks[ev.jhat.which].hats &= ~(0xf<<ev.jhat.hat);
-		joysticks[ev.jhat.which].hats |= (ev.jhat.value<<ev.jhat.hat);
-	} else if (ev.type == SDL_JOYBUTTONDOWN || ev.type == SDL_JOYBUTTONUP) {
-		struct joyButton *j = joysticks[ev.jbutton.which].buttons;
-	
-		for (int i = 0; i < NUM_JOYSTICK_BUTTONS; ++i, ++j) {
-			if (ev.jbutton.button == j->button) {
-				if (ev.jbutton.type == SDL_JOYBUTTONUP)
-					buttons[ev.jaxis.which] |= (1<<j->bit);
-				else
-					buttons[ev.jaxis.which] &= ~(1<<j->bit);
-				break;
-			}
-		}
-	}
-		
-	if (ev.type == SDL_JOYAXISMOTION || ev.type == SDL_JOYHATMOTION) {
-		for (u32 i = JOY_MASK_UP, bit = PAD_UP; bit; i<<=1) {
-			if ((axisBits&i) || (joysticks[ev.jaxis.which].hats&i))
-				buttons[ev.jaxis.which] &= ~(1<<bit);
-			else
-				buttons[ev.jaxis.which] |= (1<<bit);
-			if (bit == PAD_UP)
-				bit = PAD_RIGHT;
-			else if (bit == PAD_RIGHT)
-				bit = PAD_DOWN;
-			else if (bit == PAD_DOWN)
-				bit = PAD_LEFT;
-			else
-				bit = 0;
-		}
-	}
-}
-
-void avr8::load_joystick_file(const char* filename)
-{
-	bool validFile = true;
-	FILE* f = fopen(filename,"rb");
-	
-	if (f) {
-		size_t btnsSize = MAX_JOYSTICKS*NUM_JOYSTICK_BUTTONS*sizeof(struct joyButton);
-		size_t axesSize = MAX_JOYSTICKS*MAX_JOYSTICK_AXES*sizeof(struct joyAxis);
-		fseek(f,0,SEEK_END);
-		
-		size_t size = ftell(f);
-		
-		if (size < (btnsSize+axesSize)) {
-			validFile = false;
-		} else {
-			fseek(f,0,SEEK_SET);
-			size_t result;
-			
-			for (int i = 0; i < MAX_JOYSTICKS; ++i) {
-				if (!(result = fread(joyButtons[i],NUM_JOYSTICK_BUTTONS*sizeof(struct joyButton),1,f)) || 
-						!(result = fread(joysticks[i].axes,MAX_JOYSTICK_AXES*sizeof(struct joyAxis),1,f)))
-					validFile = false;
-			}
-		}
-		fclose(f);
-
-		if (!validFile)
-			printf("Warning: Invalid Joystick settings file.\n");
-	}
-}
-
-
 
 #ifdef SPI_DEBUG
 char ascii(unsigned char ch){
@@ -3044,20 +2531,7 @@ void avr8::shutdown(int errcode){
     }
 #endif // __EMSCRIPTEN__
 
-	if (joystickFile) {
-		FILE* f = fopen(joystickFile,"wb");
-
-        if(f) {
-			for (int i = 0; i < MAX_JOYSTICKS; ++i) {
-				fwrite(joyButtons[i],sizeof(struct joyButton),NUM_JOYSTICK_BUTTONS,f);
-				fwrite(joysticks[i].axes,sizeof(struct joyAxis),MAX_JOYSTICK_AXES,f);
-				
-				if (joysticks[i].device)
-					SDL_JoystickClose(joysticks[i].device);
-			}
-            fclose(f);
-        }
-	}
+	idrv->joystick_shutdown();
 
     exit(errcode);
 }
@@ -3066,13 +2540,13 @@ void avr8::shutdown(int errcode){
 void avr8::idle(void){
     SDL_Event event;
     
-    while (SDL_PollEvent(&event)) {
+    while (idrv->poll(&event)) {
 	if ((event.type == SDL_QUIT) || (event.key.keysym.sym == SDLK_ESCAPE)) {
             printf("User abort.\n");
             shutdown(0);
         }
     }
 
-    SDL_Delay(5);
+	usleep(5000);
 }
 

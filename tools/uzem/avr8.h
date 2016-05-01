@@ -33,6 +33,9 @@ THE SOFTWARE.
     #include "gdbserver.h"
 #endif // NOGDB
 #include "SDEmulator.h"
+#include "audio_driver.h"
+#include "input_driver.h"
+#include "video_driver.h"
 
 #if defined(__WIN32__)
     #include <windows.h> // Win32 memory mapped I/O
@@ -70,39 +73,6 @@ THE SOFTWARE.
 #define KB_SEND_FIRMWARE_REV 0x03
 #define KB_RESET 0x7f
 
-
-// Joysticks
-#define MAX_JOYSTICKS 2
-#define NUM_JOYSTICK_BUTTONS 8
-#define MAX_JOYSTICK_AXES 8
-#define MAX_JOYSTICK_HATS 8
-
-#define JOY_SNES_X 0
-#define JOY_SNES_A 1
-#define JOY_SNES_B 2
-#define JOY_SNES_Y 3
-#define JOY_SNES_LSH 6
-#define JOY_SNES_RSH 7
-#define JOY_SNES_SELECT 8
-#define JOY_SNES_START 9
-
-#define JOY_DIR_UP 1
-#define JOY_DIR_RIGHT 2
-#define JOY_DIR_DOWN 4
-#define JOY_DIR_LEFT 8
-#define JOY_DIR_COUNT 4
-#define JOY_AXIS_UNUSED -1
-
-#define JOY_MASK_UP 0x11111111
-#define JOY_MASK_RIGHT 0x22222222
-#define JOY_MASK_DOWN 0x44444444
-#define JOY_MASK_LEFT 0x88888888
-
-#ifndef JOY_ANALOG_DEADZONE
-	#define JOY_ANALOG_DEADZONE 4096
-#endif
-
-
 #if defined (_MSC_VER) && _MSC_VER >= 1400
 	// don't whine about sprintf and fopen.
 	// could switch to sprintf_s but that's not standard.
@@ -111,9 +81,6 @@ THE SOFTWARE.
 
 // 644 Overview: http://www.atmel.com/dyn/resources/prod_documents/doc2593.pdf
 // AVR8 insn set: http://www.atmel.com/dyn/resources/prod_documents/doc0856.pdf
-
-enum { NES_A, NES_B, PAD_SELECT, PAD_START, PAD_UP, PAD_DOWN, PAD_LEFT, PAD_RIGHT };
-enum { SNES_B, SNES_Y, SNES_A=8, SNES_X, SNES_LSH, SNES_RSH };
 
 enum {CAPTURE_NONE,CAPTURE_READ,CAPTURE_WRITE};
 
@@ -198,21 +165,6 @@ typedef struct {
 
 using namespace std;
 
-struct joyButton { u8 button; u8 bit; };
-struct joyAxis { int axis; u8 bits; };
-struct joystickState {
-	SDL_Joystick *device;
-	struct joyButton *buttons;
-	struct joyAxis axes[MAX_JOYSTICK_AXES];
-	u32 hats; // 4 bits per hat (1 for each direction)
-};
-
-enum { JMAP_IDLE, JMAP_INIT, JMAP_BUTTONS, JMAP_AXES, JMAP_MORE_AXES, JMAP_DONE };
-
-struct joyMapSettings {
-	int jstate, jiter, jindex, jaxis;
-};
-
 enum cpu_state {
 	CPU_RUNNING,
 	CPU_STOPPED,
@@ -253,60 +205,6 @@ struct SDPartitionEntry{
     u32 sectorCount;
 };
 
-class ringBuffer
-{
-public:
-	ringBuffer(int s) : head(0), tail(0), avail(s), size(s),last(127)
-	{
-		buffer = new u8[size];
-	}
-	~ringBuffer()
-	{
-		delete[] buffer;
-	}
-	bool isFull() const
-	{
-		return avail == 0;
-	}
-	void push(u8 data)
-	{
-		if (avail)
-		{
-			buffer[head++] = data;
-			if (head == size) 
-				head = 0;
-			--avail;
-		}
-	}
-	bool isEmpty() const
-	{
-		return avail == size;
-	}
-	int getUsed() const
-	{
-		return size - avail;
-	}
-	u8 pop()
-	{
-		if (avail != size)
-		{
-			++avail;
-			u8 result = buffer[tail++];
-			last=result;
-			if (tail == size) tail = 0;
-			return result;
-		}
-		else
-			return last;//128;
-	}
-private:
-	int head, tail, size, avail;
-	u8 *buffer;
-	u8 last;
-};
-
-
-
 struct avr8
 {
 	avr8() :
@@ -321,17 +219,14 @@ struct avr8
 		//at the reset vector takes only 2 cycles
 		cycleCounter(-1),
 
-		/*SDL*/
-		window(0),renderer(0),surface(0),texture(0),
-
 		/*Video*/
 		fullscreen(false),inset(0),
 
 		/*Audio*/
-		audioRing(1024),enableSound(true),
+		enableSound(true),
 
 		/*Joystick*/
-		joystickFile(0),pad_mode(SNES_PAD), new_input_mode(false),
+		new_input_mode(false),
 
 #ifndef NOGDB
 		/*GDB*/
@@ -452,10 +347,10 @@ public:
 	/*Video*/
 	char caption[128];
 
-	SDL_Window *window;
-	SDL_Renderer *renderer;
-	SDL_Surface *surface;
-	SDL_Texture *texture;
+	audio_driver_t *adrv;
+	input_driver_t *idrv;
+	video_driver_t *vdrv;
+
 	int sdl_flags;
 	int scanline_count;
 	unsigned int left_edge_cycle;
@@ -468,20 +363,12 @@ public:
 	bool fullscreen;
 
 	/*Audio*/
-	ringBuffer audioRing;
-	void audio_callback(Uint8 *stream,int len);
-	static void audio_callback_stub(void *userdata, Uint8 *stream, int len){((avr8*)userdata)->audio_callback(stream,len);}
 	bool enableSound;
 
 	/*Joystick*/
-	joystickState joysticks[MAX_JOYSTICKS];
-	joyMapSettings jmap;
 	// SNES bit order:  B, Y, Select, Start, Up, Down, Left, Right, A, X, L, R
 	// NES bit order:  A, B, Select, Start, Up, Down, Left, Right
-	u32 buttons[2], latched_buttons[2];
-	int mouse_scale;
-	enum { NES_PAD, SNES_PAD, SNES_PAD2, SNES_MOUSE } pad_mode;
-	const char* joystickFile;
+	u32 latched_buttons[2];
 	bool new_input_mode;
 
 #ifndef NOGDB

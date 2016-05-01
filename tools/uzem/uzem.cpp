@@ -38,6 +38,9 @@ THE SOFTWARE.
 #include <emscripten.h>
 #endif
 
+extern audio_driver_t audio_driver_sdl;
+extern input_driver_t input_driver_sdl;
+extern video_driver_t video_driver_sdl;
 
 static const struct option longopts[] ={
     { "help"       , no_argument      , NULL, 'h' },
@@ -135,6 +138,10 @@ int main(int argc,char **argv)
     // init basic flags before parsing args
     uzebox.sdl_flags = SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC;
 
+	uzebox.adrv = &audio_driver_sdl;
+	uzebox.idrv = &input_driver_sdl;
+	uzebox.vdrv = &video_driver_sdl;
+
     if(argc == 1) {
         showHelp(argv[0]);
 		return 1;
@@ -163,10 +170,10 @@ int main(int argc,char **argv)
 			uzebox.sdl_flags &= ~SDL_RENDERER_PRESENTVSYNC;
             break;
         case 'm':
-			uzebox.pad_mode = avr8::SNES_MOUSE;
+			uzebox.idrv->pad_mode = SNES_MOUSE;
             break;
         case '2':
-			uzebox.pad_mode = avr8::SNES_PAD2;
+			uzebox.idrv->pad_mode = SNES_PAD2;
             break;
 #ifndef __EMSCRIPTEN__
         case 'r':
@@ -255,7 +262,7 @@ int main(int argc,char **argv)
                 }
                 // enable mouse support if required
                 if(uzeRomHeader.mouse){
-                    uzebox.pad_mode = avr8::SNES_MOUSE;
+                    uzebox.idrv->pad_mode = SNES_MOUSE;
                     printf("Mouse support enabled\n");
                 }
             }else{
@@ -426,11 +433,11 @@ int main(int argc,char **argv)
 #else // __EMSCRIPTEN__
 	while (true)
 	{
-		if (uzebox.fullscreen){
-			puts(uzebox.caption);
-		}else{
-			if (uzebox.window) SDL_SetWindowTitle(uzebox.window,uzebox.caption);
-		}
+//		if (uzebox.fullscreen){
+//			puts(uzebox.caption);
+//		}else{
+//			if (uzebox.window) SDL_SetWindowTitle(uzebox.window,uzebox.caption);
+//		}
 
 		left = cycles;
 		now = SDL_GetTicks();

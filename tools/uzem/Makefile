@@ -63,7 +63,10 @@ else
 CPPFLAGS += -DNOGDB=1
 endif
 
-SRCS := uzem.cpp avr8.cpp uzerom.cpp $(GDB_SRCS) SDEmulator.cpp
+SRCS := uzem.cpp avr8.cpp uzerom.cpp $(GDB_SRCS) SDEmulator.cpp \
+	audio_driver.cpp audio_driver_sdl.cpp \
+	input_driver.cpp input_driver_sdl.cpp \
+	video_driver.cpp video_driver_sdl.cpp
 
 ######################################
 # Architecture
