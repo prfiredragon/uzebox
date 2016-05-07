@@ -22,6 +22,10 @@ ifeq ($(EMSCRIPTEN_BUILD),1)
     NOGDB=1
 endif
 
+ifeq ($(LIBRETRO_BUILD),1)
+    NOGDB=1
+endif
+
 #Uncomment to optimize for local CPU
 #ARCH=native
 #TUNE=y
@@ -63,11 +67,6 @@ else
 CPPFLAGS += -DNOGDB=1
 endif
 
-SRCS := uzem.cpp avr8.cpp uzerom.cpp $(GDB_SRCS) SDEmulator.cpp \
-	audio_driver.cpp audio_driver_sdl.cpp \
-	input_driver.cpp input_driver_sdl.cpp \
-	video_driver.cpp video_driver_sdl.cpp
-
 ######################################
 # Architecture
 ######################################
@@ -95,28 +94,48 @@ CPPFLAGS += $(SDL_FLAGS) -D$(OS) -D_GNU_SOURCE=1 -DGUI=1 -DJOY_ANALOG_DEADZONE=8
 # Release definitions
 ######################################
 RELEASE_NAME = uzem$(OS_EXTENSION)
+RELEASE_LIBRETRO = uzem_libretro$(OS_SHLIB_EXTENSION)
 RELEASE_OBJ_DIR := Release
 ifeq ($(EMSCRIPTEN_BUILD),1)
     RELEASE_CPPFLAGS = $(CPPFLAGS) $(EMSCRIPTEN_FLAGS) -O3 -s AGGRESSIVE_VARIABLE_ELIMINATION=1 --llvm-lto 3
     RELEASE_LDFLAGS  = $(LDFLAGS)  $(EMSCRIPTEN_FLAGS) -O3 -s AGGRESSIVE_VARIABLE_ELIMINATION=1 --llvm-lto 3
 else
-    RELEASE_CPPFLAGS = $(CPPFLAGS) -O3 -flto -fwhole-program
-    RELEASE_LDFLAGS  = $(LDFLAGS)  -O3 -flto -fwhole-program
+    ifeq ($(LIBRETRO_BUILD),1)
+        RELEASE_CPPFLAGS = $(CPPFLAGS) -O3 -fPIC
+        RELEASE_LDFLAGS  = -O3 --shared -Wl,--version-script=link.T -Wl,--no-undefined
+    else
+        RELEASE_CPPFLAGS = $(CPPFLAGS) -O3 -flto -fwhole-program
+        RELEASE_LDFLAGS  = $(LDFLAGS)  -O3 -flto -fwhole-program
+    endif
 endif
 
 ######################################
 # Debug definitions
 ######################################
 DEBUG_NAME = uzemdbg$(OS_EXTENSION)
+DEBUG_LIBRETRO = uzemdbg_libretro$(OS_SHLIB_EXTENSION)
 DEBUG_OBJ_DIR := Debug
 DEBUG_DEFINES := USE_SPI_DEBUG=1 USE_EEPROM_DEBUG=1 USE_GDBSERVER_DEBUG=1
 ifeq ($(EMSCRIPTEN_BUILD),1)
     DEBUG_CPPFLAGS = $(CPPFLAGS) -g $(EMSCRIPTEN_FLAGS)
     DEBUG_LDFLAGS  = $(LDFLAGS)  -g $(EMSCRIPTEN_FLAGS)
 else
-    DEBUG_CPPFLAGS = $(CPPFLAGS) -g
-    DEBUG_LDFLAGS  = $(LDFLAGS)  -g
+    ifeq ($(LIBRETRO_BUILD),1)
+        DEBUG_CPPFLAGS = $(CPPFLAGS) -g -fPIC
+        DEBUG_LDFLAGS  = -g --shared -Wl,--version-script=link.T -Wl,--no-undefined
+    else
+	DEBUG_CPPFLAGS = $(CPPFLAGS) -g
+	DEBUG_LDFLAGS  = $(LDFLAGS)  -g
+    endif
 endif
+
+DRIVER_BASE := audio_driver.cpp input_driver.cpp video_driver.cpp
+DRIVER_SDL := audio_driver_sdl.cpp input_driver_sdl.cpp video_driver_sdl.cpp
+DRIVER_LIBRETRO := audio_driver_libretro.cpp input_driver_libretro.cpp video_driver_libretro.cpp
+
+SRCS := avr8.cpp uzerom.cpp $(GDB_SRCS) SDEmulator.cpp $(DRIVER_BASE)
+SRCS_MAIN := uzem.cpp $(DRIVER_SDL)
+SRCS_LIBRETRO := uzem_libretro.cpp $(DRIVER_LIBRETRO)
 
 ######################################
 # SD Options
@@ -136,6 +155,7 @@ PLATFORM = Unknown
 ifeq ($(UNAME),Linux)
 OS := LINUX
 PLATFORM := Unix
+OS_SHLIB_EXTENSION := .so
 ifeq ($(EMSCRIPTEN_BUILD),1)
     SDL_FLAGS :=
     CC := emcc
@@ -153,6 +173,7 @@ endif
 ifeq ($(UNAME),Darwin)
 OS := MACOSX
 PLATFORM := Unix
+OS_SHLIB_EXTENSION := .dylib
 SDL_FLAGS := $(shell sdl2-config --cflags)
 LDFLAGS += $(shell sdl2-config --libs)
 CPPFLAG += -framework Cocoa
@@ -172,6 +193,7 @@ endif
 ifneq (,$(findstring MINGW,$(UNAME)))
 PLATFORM := Windows
 OS_EXTENSION := .exe
+OS_SHLIB_EXTENSION := .dll
 
 # First check in C:/SDL2
 SDL_BASE_DIR := C:/SDL2
@@ -231,18 +253,22 @@ ifeq ($(PROF),y)
     CPPFLAGS += -pg
 endif
 
-
-TARGET_NAME = $(BIN_DIR)$($(CFG)_NAME)
 TARGET_OBJ_DIR = $($(CFG)_OBJ_DIR)
 TARGET_CPPFLAGS = $($(CFG)_CPPFLAGS)
 TARGET_LDFLAGS = $($(CFG)_LDFLAGS)
 TARGET_DEFINES = $($(CFG)_DEFINES)
 TARGET_MSG = $($(CFG)_MSG)
 
-TARGET_OBJS = $(patsubst %.cpp, $(TARGET_OBJ_DIR)/%.o, $(SRCS))
+ifeq ($(LIBRETRO_BUILD),1)
+    TARGET_NAME = $(BIN_DIR)$($(CFG)_LIBRETRO)
+    TARGET_OBJS = $(patsubst %.cpp, $(TARGET_OBJ_DIR)/%.o, $(SRCS) $(SRCS_LIBRETRO))
+else
+    TARGET_NAME = $(BIN_DIR)$($(CFG)_NAME)
+    TARGET_OBJS = $(patsubst %.cpp, $(TARGET_OBJ_DIR)/%.o, $(SRCS) $(SRCS_MAIN))
+endif
 TARGET_D_DEFINES = $(patsubst %,-D%, $(TARGET_DEFINES))
 
-DEP = $(patsubst %.cpp, $(TARGET_OBJ_DIR)/%.d, $(SRCS))
+DEP = $(patsubst %.cpp, $(TARGET_OBJ_DIR)/%.d, $(SRCS) $(SRCS_MAIN) $(SRCS_LIBRETRO))
 -include $(DEP)
 DEPFLAGS = -MD -MP -MF $(patsubst %.o,%.d,$@ )
 

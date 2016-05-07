@@ -1,10 +1,12 @@
 bin
 Release
 Debug
+nbproject
 .settings
 dep
 eeprom.bin
 *.o
+*.so
 *.lss
 *.hex
 *.elf
@@ -17,3 +19,7 @@ eeprom.bin
 *.log
 *.bak
 gdb-script.cfg
+tools/uzem/uzem
+tools/uzem/uzem.*
+tools/uzem/uzemdbg
+tools/uzem/uzemdbg.*
