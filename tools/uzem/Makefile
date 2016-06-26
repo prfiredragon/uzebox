@@ -160,9 +160,13 @@ ifeq ($(EMSCRIPTEN_BUILD),1)
     SDL_FLAGS :=
     CC := emcc
 else
-    SDL_FLAGS := $(shell sdl2-config --cflags)
-    LDFLAGS += $(shell sdl2-config --libs)
     CC := g++
+    ifeq ($(LIBRETRO_BUILD),1)
+        SDL_FLAGS := -I.
+    else
+        SDL_FLAGS := $(shell sdl2-config --cflags)
+        LDFLAGS += $(shell sdl2-config --libs)
+    endif
 endif
 MKDIR := mkdir -p
 RM := rm -rf

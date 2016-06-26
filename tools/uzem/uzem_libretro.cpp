@@ -32,6 +32,7 @@ THE SOFTWARE.
 #include <limits.h>
 #include <string.h>
 #include <stdlib.h>
+#include <stdarg.h>
 #include <time.h>
 
 #define printerr(fmt,...) fprintf(stderr,fmt,##__VA_ARGS__)
