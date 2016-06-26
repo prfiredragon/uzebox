@@ -37,6 +37,7 @@ THE SOFTWARE.
 #define printerr(fmt,...) fprintf(stderr,fmt,##__VA_ARGS__)
 
 avr8 uzebox;
+static char sd_path[4096];
 
 extern audio_driver_t audio_driver_libretro;
 extern input_driver_t input_driver_libretro;
@@ -156,6 +157,15 @@ void retro_set_environment(retro_environment_t cb)
 	};
 
 	cb(RETRO_ENVIRONMENT_SET_CONTROLLER_INFO, (void*) ports);
+
+	char *dir = NULL;
+	if (cb(RETRO_ENVIRONMENT_GET_CORE_ASSETS_DIRECTORY, &dir)) {
+		if (dir != NULL) {
+			strncpy(sd_path, dir, sizeof(sd_path));
+			uzebox.SDpath = &sd_path[0];
+			uzebox.init_sd();
+		}
+	}
 }
 
 void retro_set_audio_sample(retro_audio_sample_t cb)
