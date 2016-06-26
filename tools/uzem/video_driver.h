@@ -40,6 +40,7 @@ typedef struct video_driver {
 	void (*record_frame)(FILE *avconv_video);
 	void (*screenshot)(char *filename);
 	void (*update_mouse)();
+	void (*set_title)(char *title);
 } video_driver_t;
 
 video_driver_t * video_driver_get_default();

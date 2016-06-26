@@ -433,11 +433,11 @@ int main(int argc,char **argv)
 #else // __EMSCRIPTEN__
 	while (true)
 	{
-//		if (uzebox.fullscreen){
-//			puts(uzebox.caption);
-//		}else{
-//			if (uzebox.window) SDL_SetWindowTitle(uzebox.window,uzebox.caption);
-//		}
+		if (uzebox.fullscreen){
+			puts(uzebox.caption);
+		}else{
+			uzebox.vdrv->set_title(uzebox.caption);
+		}
 
 		left = cycles;
 		now = SDL_GetTicks();

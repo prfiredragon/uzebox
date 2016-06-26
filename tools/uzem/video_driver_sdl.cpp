@@ -52,7 +52,6 @@ static bool video_driver_sdl_init(const char *caption, bool fullscreen, int sdl_
 	}
 
 	atexit(SDL_Quit);
-//	init_joysticks();
 
 	data.window = SDL_CreateWindow(caption,SDL_WINDOWPOS_CENTERED,SDL_WINDOWPOS_CENTERED,630,448,fullscreen?SDL_WINDOW_FULLSCREEN:SDL_WINDOW_RESIZABLE);
 	if (!data.window){
@@ -157,6 +156,11 @@ static void video_driver_sdl_screenshot(char *filename)
 	}
 }
 
+static void video_driver_sdl_set_title(char *title)
+{
+	SDL_SetWindowTitle(data.window, title);
+}
+
 video_driver_t video_driver_sdl = {
     .width = 720,
     .height = 448,
@@ -168,5 +172,6 @@ video_driver_t video_driver_sdl = {
 	.update_frame = video_driver_sdl_update_frame,
 	.record_frame = video_driver_sdl_record_frame,
 	.screenshot = video_driver_sdl_screenshot,
-	.update_mouse = video_driver_sdl_update_mouse
+	.update_mouse = video_driver_sdl_update_mouse,
+	.set_title = video_driver_sdl_set_title
 };
