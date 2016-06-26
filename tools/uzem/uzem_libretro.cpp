@@ -89,7 +89,7 @@ unsigned retro_get_region(void)
 void retro_get_system_info(struct retro_system_info *info)
 {
 	memset(info, 0, sizeof(*info));
-	info->library_name = "uzem";
+	info->library_name = "Uzem";
 	info->library_version = VERSION;
 	info->need_fullpath = false;
 	info->valid_extensions = "uze";
